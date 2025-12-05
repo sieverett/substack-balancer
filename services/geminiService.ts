@@ -3,100 +3,48 @@ import { ReviewResponse } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-// Helper to fetch and parse Substack content via a proxy to avoid CORS
-const fetchSubstackContent = async (url: string): Promise<string> => {
-  try {
-    // 1. Clean the URL to remove tracking params which might trigger different server behavior
-    const urlObj = new URL(url);
-    const cleanUrl = `${urlObj.origin}${urlObj.pathname}`;
-
-    // 2. Use allorigins as proxy
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(cleanUrl)}&disableCache=true`;
-    const response = await fetch(proxyUrl);
-    const data = await response.json();
+// Shared analysis logic for both scraped content and raw text
+const performAnalysis = async (content: string): Promise<ReviewResponse> => {
+  const analysisInstructions = `
+    Please perform the following steps:
+    1. **The Assertions**: Cut through the noise. What is the author actually claiming? Be brief.
+    2. **The Reality Check**: Use Google Search to ruthlessly verify these claims against **at least 10 major, reputable news outlets** (e.g., AP, Reuters, NYT, BBC, Nature, Science, The Economist, etc.). Call out unsupported assertions, exaggerations, or factual errors directly.
+    3. **The Counter-Point**: Provide a sharp, informed counter-perspective based on the facts found. Be assertive. **Crucial: Cite your sources inline (e.g., [Source Name]) for every counter-claim or fact check.**
+    4. **Questions for the Author**: List 3-5 hard-hitting, specific questions the author needs to answer to substantiate their position.
     
-    if (!data.contents) {
-      throw new Error("No content received from proxy.");
-    }
-
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(data.contents, "text/html");
-
-    // 3. Robust Selectors for Substack
-    // Substack structure varies, but usually content is in .body.markup or .available-content
-    const contentNode = 
-      doc.querySelector('.body.markup') || 
-      doc.querySelector('.available-content') || 
-      doc.querySelector('.post-content') || 
-      doc.querySelector('article') || 
-      doc.querySelector('main') ||
-      doc.body;
-
-    // 4. Aggressive cleaning of non-content elements
-    if (!contentNode) {
-      throw new Error("Could not find content section in the page.");
-    }
+    Format the output clearly in Markdown with these headers:
+    ## The Assertions
+    ## The Reality Check
+    ## The Counter-Point
+    ## Questions for the Author
     
-    // Remove scripts, styles, svgs, buttons, navs to reduce noise
-    const elementsToRemove = contentNode.querySelectorAll('script, style, svg, button, nav, footer, iframe, .subscribe-widget, .share-dialog');
-    elementsToRemove.forEach(el => el.remove());
+    Tone: Witty, sharp, and concise. No filler.
+  `;
 
-    const textContent = contentNode.textContent || "";
-    const cleanText = textContent.replace(/\s+/g, ' ').trim();
-
-    if (cleanText.length < 100) {
-      throw new Error("Extracted content is too short to analyze.");
-    }
-
-    // Truncate to avoid extremely large contexts, though Gemini 2.5 handles a lot.
-    return cleanText.slice(0, 30000); 
-
-  } catch (error) {
-    console.error("Error fetching Substack content:", error);
-    throw new Error("Failed to extract content from the URL. Ensure it is a valid public Substack post.");
-  }
-};
-
-export const analyzeSubstackPost = async (url: string): Promise<ReviewResponse> => {
-  // 1. Fetch text content from the URL
-  const postContent = await fetchSubstackContent(url);
-
-  // 2. Construct the prompt
   const prompt = `
-    You are a critical reviewer and fact-checker. 
-    Analyze the following text extracted from a Substack post. 
-    Identify the main claims, arguments, and assertions. 
-    Verify these claims using Google Search to check their accuracy against major, trusted news outlets and official data sources.
+    Task: Analyze the following text and provide a critical review.
 
-    Provide a "Critical Review" that:
-    1. Summarizes the main argument of the post briefly.
-    2. Highlights specific claims that are controversial, misleading, or factually incorrect, or confirms if they are accurate.
-    3. Provides evidence from trusted sources to support your analysis.
-    4. Concludes with a balanced, constructive counter-perspective or additional context that the original post might lack.
-
-    The output must be in Markdown format. Use bolding for key points.
+    ${analysisInstructions}
     
-    Post Content:
-    "${postContent}"
+    **Input Text**:
+    """
+    ${content}
+    """
   `;
 
   try {
-    // 3. Call Gemini with Google Search Tool
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
-        // responseMimeType and responseSchema are NOT compatible with googleSearch tool
+        temperature: 0.7,
       },
     });
 
-    const markdown = response.text || "No analysis could be generated.";
+    const markdown = response.text || "No analysis could be generated. The AI might be having trouble processing this text.";
     
-    // 4. Extract sources from grounding chunks
     const sources: Array<{ title: string; uri: string }> = [];
-    
-    // Check if grounding metadata exists and map to source objects
     const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
     
     chunks.forEach((chunk: any) => {
@@ -108,7 +56,6 @@ export const analyzeSubstackPost = async (url: string): Promise<ReviewResponse> 
       }
     });
 
-    // Remove duplicate URIs
     const uniqueSources = sources.filter((source, index, self) =>
       index === self.findIndex((s) => s.uri === source.uri)
     );
@@ -120,6 +67,89 @@ export const analyzeSubstackPost = async (url: string): Promise<ReviewResponse> 
 
   } catch (error: any) {
     console.error("Gemini Analysis Error:", error);
-    throw new Error("Failed to analyze the post with AI. Please try again later.");
+    throw new Error("Analysis failed. The AI service may be temporarily unavailable.");
   }
+};
+
+// Helper to fetch and parse Substack content via a proxy
+const fetchSubstackContent = async (url: string): Promise<string | null> => {
+  try {
+    const urlObj = new URL(url);
+    const cleanUrl = `${urlObj.origin}${urlObj.pathname}`;
+
+    // Use allorigins as proxy
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(cleanUrl)}&disableCache=true`;
+    
+    let response;
+    try {
+      response = await fetch(proxyUrl);
+    } catch (networkError) {
+      console.warn("Network error fetching via proxy:", networkError);
+      return null;
+    }
+
+    const data = await response.json();
+    
+    if (!data.contents) {
+      console.warn("Proxy returned no content");
+      return null;
+    }
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(data.contents, "text/html");
+
+    // Robust Selectors for Substack
+    const contentNode = 
+      doc.querySelector('.body.markup') || 
+      doc.querySelector('.available-content') || 
+      doc.querySelector('.post-content') || 
+      doc.querySelector('.portable-archive-post') ||
+      doc.querySelector('div.single-post') ||
+      doc.querySelector('article') || 
+      doc.querySelector('main') ||
+      doc.body;
+
+    if (!contentNode) return null;
+    
+    // Aggressive cleaning of noise/modals
+    const elementsToRemove = contentNode.querySelectorAll(
+      'script, style, svg, button, nav, footer, iframe, .subscribe-widget, .share-dialog, .modal, [class*="subscribe"], [id*="subscribe"], .post-footer, .comments-section'
+    );
+    elementsToRemove.forEach(el => el.remove());
+
+    const textContent = contentNode.textContent || "";
+    const cleanText = textContent.replace(/\s+/g, ' ').trim();
+
+    // Heuristics for failed scrapes or paywalls
+    const isPaywall = /sign in to read|subscribe to read|upgrade to paid/i.test(cleanText.substring(0, 500));
+    const isTooShort = cleanText.length < 300;
+
+    if (isTooShort || isPaywall) {
+      console.warn("Extracted text is too short or indicates a paywall.");
+      return null;
+    }
+
+    return cleanText.slice(0, 50000); 
+
+  } catch (error) {
+    console.warn("Scraping failed safely:", error);
+    return null;
+  }
+};
+
+export const analyzeSubstackPost = async (url: string): Promise<ReviewResponse> => {
+  const postContent = await fetchSubstackContent(url);
+  
+  if (!postContent) {
+    throw new Error("Unable to extract content from this URL automatically. Please copy the text and use the 'Paste Text' tab instead.");
+  }
+
+  return performAnalysis(postContent);
+};
+
+export const analyzeRawText = async (text: string): Promise<ReviewResponse> => {
+  if (text.trim().length < 50) {
+    throw new Error("The text provided is too short to analyze.");
+  }
+  return performAnalysis(text);
 };

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { InputSection } from './components/InputSection';
 import { ReviewDisplay } from './components/ReviewDisplay';
 import { AboutModal } from './components/AboutModal';
-import { analyzeSubstackPost } from './services/geminiService';
+import { analyzeSubstackPost, analyzeRawText } from './services/geminiService';
 import { AnalysisStatus, AnalysisError, ReviewResponse } from './types';
 import { BookOpen, AlertCircle } from 'lucide-react';
 
@@ -12,11 +12,16 @@ const App: React.FC = () => {
   const [error, setError] = useState<AnalysisError | null>(null);
   const [showAbout, setShowAbout] = useState(false);
 
-  const handleAnalyze = async (url: string) => {
+  const handleAnalyze = async (input: string, mode: 'url' | 'text') => {
     setStatus(AnalysisStatus.ANALYZING);
     setError(null);
     try {
-      const result = await analyzeSubstackPost(url);
+      let result;
+      if (mode === 'url') {
+        result = await analyzeSubstackPost(input);
+      } else {
+        result = await analyzeRawText(input);
+      }
       setData(result);
       setStatus(AnalysisStatus.COMPLETED);
     } catch (err: any) {
@@ -75,7 +80,7 @@ const App: React.FC = () => {
               Bring Balance to the Conversation
             </h2>
             <p className="text-lg text-gray-400">
-              Paste a Substack URL below. We'll identify the main claims, check them against major news outlets, and generate a constructive, fact-based counter-point for you to share.
+              Paste a Substack URL or the full article text below. We'll identify the main claims, check them against major news outlets, and generate a constructive, fact-based counter-point.
             </p>
           </div>
         )}
