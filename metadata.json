@@ -1,0 +1,5 @@
+{
+  "name": "Substack Critic & Balancer",
+  "description": "A tool to analyze Substack posts, verify assertions against major news outlets, and generate balanced, fact-based counter-points for constructive discussion.",
+  "requestFramePermissions": []
+}
